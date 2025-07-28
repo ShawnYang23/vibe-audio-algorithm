@@ -2,6 +2,8 @@
 from scipy.io import wavfile
 import numpy as np
 import os
+import matplotlib.pyplot as plt
+
 
 def read_wave_file(file_path: str, mic_chn) -> np.ndarray:
         """ Reads a wave file and extracts microphone and loopback data.
@@ -97,3 +99,31 @@ def write_wave_file(file_path: str, data: np.ndarray, channels: int = 1, sample_
 
     print(f"Wave file written to {file_path}")
     return file_path
+
+def plot_2d_data(data: np.ndarray, title: str = "Data Plot", xlabel: str = "Sample Index", ylabel: str = "Value", save_path: str = None):
+    """ Plots 2D data using matplotlib.
+    Args:
+        data (np.ndarray): 2D data to plot.
+        title (str): Title of the plot.
+        xlabel (str): X-axis label.
+        ylabel (str): Y-axis label.
+        save_path (str): Path to save the plot image, if None, will show the plot.          
+    """
+    if data.ndim != 2 and data.ndim != 1:
+        raise ValueError(f"Data must be 2D or 1D numpy array, got {data.ndim}D.")
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    plt.figure(figsize=(12, 6))
+    for i in range(data.shape[1]):
+        plt.plot(data[:, i], label=f'Channel {i+1}')
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend()
+    plt.grid()
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Plot saved to {save_path}")
+    else:
+        plt.show()
+    plt.close()
