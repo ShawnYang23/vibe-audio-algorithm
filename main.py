@@ -7,13 +7,13 @@ from dtd_mod import FastDoubleTalkDetector
 import matplotlib.pyplot as plt
 
 output_path = "/mnt/c/Users/jmysy/Music/Room-Bot-Audio/tmp/"
-input_path = "./data/250718_bot_room1_48k_src_all.wav"
+input_path = "./data/250718_bot_room6_48k_src_all.wav"
 
 lenth = -1 # default filter length
-AEC = AECEngine(mode="kalman-f", filter_len=lenth, mu=0.1)
+AEC = AECEngine(mode="nlms", filter_len=lenth, mu=0.45) #nlms，kalman-t, kalman-f, speex
 VAD = SileroVAD(sampling_rate=16000, threshold=0.3, window_size=512)
 DTD = FastDoubleTalkDetector(detect_lenth=2048, method="shape")
-
+mic_supression_factor = 0.01  # Factor to suppress mic signal
 
 mic_signal, ref_signal = utils.read_wave_file(input_path, mic_chn=0)
 
@@ -33,6 +33,8 @@ vad_data = np.zeros_like(mic_signal)
 output = mic_signal.copy()  # Start with mic signal as output
 output = output.astype(np.float32)  # Ensure float32 for processing
 frame_len = AEC.filter_len 
+ERLE = []
+
 
 for segment in vad_segments:
     start = int(segment['start'])
@@ -48,11 +50,15 @@ for segment in vad_segments:
     vad_data[start:end] = 0.6  # Mark VAD segment
     output[start:end] = 0  # Reset output segment
     # dtd_flag = DTD.is_double_talk_flag(mic_signal[start:end], ref_signal[start:end])
+    
     for i in range(start, end - frame_len + 1, frame_len):
-        mic_frame = mic_signal[i:i + frame_len]
+        mic_frame = mic_signal[i:i + frame_len] * mic_supression_factor
         ref_frame = ref_signal[i:i + frame_len]
         
-
+        # normalize frames
+        gain = np.std(mic_signal) / (np.std(ref_signal) + AEC.epsilon)
+        ref_signal *= gain
+        
         if len(mic_frame) < frame_len or len(ref_frame) < frame_len:
             continue
         
@@ -72,6 +78,10 @@ for segment in vad_segments:
             continue
         
         out_frame = out_frame.reshape(frame_len)
+        
+        # unti normalize output frame
+        # out_frame = out_frame * np.std(mic_frame)  # Scale back to original
+        # out_frame = np.clip(out_frame, -1.0, 1.0)
 
         if out_frame is None or len(out_frame) != frame_len:
             print(f"Warning: AEC output frame length mismatch at {i}, expected {frame_len}, got {len(out_frame)}")
@@ -79,10 +89,13 @@ for segment in vad_segments:
 
         # print(f"Processing frame {i // frame_len + 1} in segment, length: {len(mic_frame)}")
         output[i:i + frame_len] = out_frame
-
+    erle_segment = AEC.calculate_erle(mic_signal[start:end], output[start:end])
+    ERLE.append(erle_segment)
 # clip to prevent overflow
 # output = np.clip(output, -1.0, 1.0)
-
+print(f"Total segments processed: {len(vad_segments)}")
+erle_mean = np.mean(ERLE)
+print(f"Mean ERLE for the entire signal: {erle_mean:.2f} dB")
 # Save output and VAD data
 out_path = f"{output_path}"+"" + f"{AEC.mode}.wav"
 vad_path = f"{output_path}"+"vad.wav"

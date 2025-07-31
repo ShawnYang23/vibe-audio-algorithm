@@ -7,44 +7,73 @@ import ctypes
 from ctypes.util import find_library
 from dtd_mod import FastDoubleTalkDetector
 from collections import deque
-
 class NLMSFilter:
-    def __init__(self, filter_len=128, mu=0.1):
+    def __init__(self, filter_len=128, mu=0.45, dynamic_mu_enabled=True):
+        self.dynamic_mu_enabled = True  # 是否启用动态 mu
         self.filter_len = filter_len
+        self.mu_min = 0.3
+        self.mu_max = 0.7
+        self.leakage = 1e-5
+        self.alpha = 0.9
         self.mu = mu
-        self.filter = pa.filters.FilterNLMS(n=filter_len, mu=mu)
+        self.filter = pa.filters.FilterNLMS(n=filter_len, mu=mu)  # 起始 mu 不重要，会动态更新
         self.ref_history = np.zeros(filter_len, dtype=np.float32)
         self._output = 0.0
         self._echo_estimate = 0.0
+        self.epsilon = 1e-8  # 防止除零
+        self.prev_error_power = self.epsilon
+        self.prev_input_power = self.epsilon
+
+    def _compute_dynamic_mu(self, e: float, x: np.ndarray) -> float:
+        # 滑动估计误差能量和参考信号能量
+        err_power = self.alpha * self.prev_error_power + (1 - self.alpha) * e**2
+        input_power = self.alpha * self.prev_input_power + (1 - self.alpha) * np.dot(x, x)
+
+        self.prev_error_power = err_power
+        self.prev_input_power = input_power
+
+        # 动态 mu 设计：误差越大、输入越强，mu 越大，控制在 [mu_min, mu_max] 之间
+        ratio = err_power / (input_power + self.epsilon)
+        mu = self.mu_min + (self.mu_max - self.mu_min) * np.clip(ratio, 0.0, 1.0)
+        return mu
 
     def process(self, mic_signal: float, ref_signal: float) -> float:
-        """
-        Process one sample using padasip's NLMS filter.
+        # 更新参考信号历史
+        self.ref_history = np.roll(self.ref_history, -1)
+        self.ref_history[-1] = ref_signal
 
-        Args:
-            mic_signal (float): Microphone signal with echo.
-            ref_signal (float): Far-end reference signal.
-
-        Returns:
-            float: Echo-cancelled signal (residual error).
-        """
-        # Update reference history
-        self.ref_history = np.roll(self.ref_history, 1)
-        self.ref_history[0] = ref_signal
-
-        # Predict echo
+        # 预测回声
         y = self.filter.predict(self.ref_history)
 
-        # Compute error (echo-cancelled output)
+        # 计算残差信号
         e = mic_signal - y
 
-        # Update weights
-        self.filter.adapt(mic_signal, self.ref_history)
+        # 计算动态 mu
+        if self.dynamic_mu_enabled:
+            dynamic_mu = self._compute_dynamic_mu(e, self.ref_history)
+            self.filter.mu = dynamic_mu
+        else:
+            self.filter.mu = self.mu
+    
 
-        # Store values
+        # 更新滤波器权重
+        self.filter.adapt(mic_signal, self.ref_history)
+        self.filter.w *= (1 - self.leakage)
+
+        # 存储状态
         self._output = e
         self._echo_estimate = y
         return e
+
+    def reset(self):
+        """Reset filter state."""
+        self.filter = pa.filters.FilterNLMS(n=self.filter_len, mu=self.mu_min)
+        self.ref_history.fill(0)
+        self._output = 0.0
+        self._echo_estimate = 0.0
+        self.prev_error_power = self.epsilon
+        self.prev_input_power = self.epsilon
+
 
     def reset(self):
         """Reset filter state."""
@@ -250,6 +279,7 @@ class SpeexAEC:
 class AECEngine:
     def __init__(self, mode: str = "nlms", filter_len: int = 128, mu: float = 0.1):
         assert mode in ["nlms", "kalman-t", "kalman-f", "speex"]
+        self.apply_pre_ns = True
         self.mode = mode
         self.filter_len = filter_len
         self.mu = mu
@@ -257,6 +287,7 @@ class AECEngine:
         self._echo_estimate = None
         self._weights = None
         self.queue = deque(maxlen=1024)
+        self.epsilon = 1e-8
         
         if filter_len <= 0:
             print(f"Warning: filter_len {filter_len} must be positive, using default.")
@@ -282,6 +313,23 @@ class AECEngine:
             raise NotImplementedError(f"AEC mode '{self.mode}' not implemented.")
             
         print(f"Initialized AECEngine with mode: {self.mode}, filter_len: {filter_len}, mu: {mu}")
+    
+    def calculate_erle(self, mic_signal: np.ndarray, echo_estimate: np.ndarray) -> float:
+        """ Calculate ERLE (Echo Return Loss Enhancement) in dB. """
+        if len(mic_signal) != len(echo_estimate):
+            raise ValueError("mic_signal and echo_estimate must have the same length.")
+        noise_power = np.mean(mic_signal ** 2) + self.epsilon  
+        echo_power = np.mean(echo_estimate ** 2) + self.epsilon 
+        if noise_power == 0:
+            return float('inf')
+        erle = 10 * np.log10(noise_power / echo_power)
+        # print(f"Calculated ERLE: {erle:.2f} dB")
+        return erle
+
+    
+    def preprocess_mic_signal(self, mic_signal: np.ndarray, apply_ns=False):
+        #placeholder for mic signal preprocessing
+        pass
 
     def process(self, mic_signal: np.ndarray, ref_signal: np.ndarray) -> np.ndarray:
         assert len(mic_signal) == len(ref_signal)
